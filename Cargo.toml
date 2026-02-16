@@ -60,5 +60,6 @@ assets = [
   ["target/release/filesnitch-ui", "usr/bin/", "755"],
   ["assets/systemd/filesnitchd.service", "lib/systemd/system/", "644"],
   ["assets/dbus/org.filesnitch.Daemon.service", "share/dbus-1/system-services/", "644"],
+  ["assets/dbus/org.filesnitch.Daemon.conf", "share/dbus-1/system.d/", "644"],
   ["assets/desktop/filesnitch-ui.desktop", "usr/share/applications/", "644"]
 ]

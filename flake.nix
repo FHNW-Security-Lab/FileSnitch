@@ -23,6 +23,7 @@
           postInstall = ''
             install -Dm644 assets/systemd/filesnitchd.service $out/lib/systemd/system/filesnitchd.service
             install -Dm644 assets/dbus/org.filesnitch.Daemon.service $out/share/dbus-1/system-services/org.filesnitch.Daemon.service
+            install -Dm644 assets/dbus/org.filesnitch.Daemon.conf $out/share/dbus-1/system.d/org.filesnitch.Daemon.conf
             install -Dm644 assets/desktop/filesnitch-ui.desktop $out/share/applications/filesnitch-ui.desktop
           '';
         };
