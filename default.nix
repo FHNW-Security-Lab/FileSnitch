@@ -11,7 +11,7 @@ rustPlatform.buildRustPackage {
   pname = "filesnitch";
   version = "0.1.0";
   src = ./.;
-  cargoHash = lib.fakeHash;
+  cargoHash = "sha256-wsAuliWp7r2FSC21HJ33Fwub4Oxn13WdUshmPgvy/wU=";
 
   nativeBuildInputs = [ pkg-config dbus cargo-deb ];
   buildInputs = [ gtk4 glib sqlite dbus ];

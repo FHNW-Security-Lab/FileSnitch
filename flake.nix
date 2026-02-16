@@ -15,7 +15,7 @@
           pname = "filesnitch";
           version = "0.1.0";
           src = ./.;
-          cargoHash = pkgs.lib.fakeHash;
+          cargoHash = "sha256-wsAuliWp7r2FSC21HJ33Fwub4Oxn13WdUshmPgvy/wU=";
 
           nativeBuildInputs = with pkgs; [ pkg-config dbus cargo-deb ];
           buildInputs = with pkgs; [ gtk4 glib dbus sqlite ];
