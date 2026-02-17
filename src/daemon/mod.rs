@@ -453,12 +453,27 @@ pub async fn run_daemon(opts: DaemonOpts) -> anyhow::Result<()> {
     });
 
     let iface = FileSnitchDbus { core: core.clone() };
-    let connection = ConnectionBuilder::system()?
-        .name(DBUS_BUS_NAME)?
-        .serve_at(DBUS_OBJECT_PATH, iface)?
-        .build()
-        .await
-        .context("failed to bind system D-Bus service")?;
+    let connection = loop {
+        let bind = async {
+            ConnectionBuilder::system()?
+                .name(DBUS_BUS_NAME)?
+                .serve_at(DBUS_OBJECT_PATH, iface.clone())?
+                .build()
+                .await
+        }
+        .await;
+
+        match bind {
+            Ok(conn) => break conn,
+            Err(err) if is_dbus_access_denied(&err) => {
+                error!(
+                    "D-Bus policy denied owning {DBUS_BUS_NAME}; retrying in 30s. error: {err}"
+                );
+                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+            }
+            Err(err) => return Err(err).context("failed to bind system D-Bus service"),
+        }
+    };
 
     let (tx, mut rx) = mpsc::channel::<KernelEvent>(1024);
     spawn_fanotify_reader(fanotify, tx);
@@ -651,6 +666,12 @@ fn should_bypass_for_desktop_stability(executable: &str) -> bool {
             | "kwin_wayland"
             | "plasmashell"
     )
+}
+
+fn is_dbus_access_denied(err: &zbus::Error) -> bool {
+    // zbus error nesting differs by backend/version, so keep matching robust.
+    err.to_string()
+        .contains("org.freedesktop.DBus.Error.AccessDenied")
 }
 
 fn rule_path_from_decision(request: &PermissionRequest, decision: &DecisionInput, home_dir: &Path) -> String {
