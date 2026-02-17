@@ -37,6 +37,7 @@ impl Default for DaemonOpts {
 struct PendingRequest {
     request: PermissionRequest,
     event_fd: i32,
+    actor_home: PathBuf,
 }
 
 pub struct DaemonCore {
@@ -45,7 +46,7 @@ pub struct DaemonCore {
     config: RwLock<DaemonConfig>,
     fanotify: Arc<FanotifyMonitor>,
     pending: Mutex<HashMap<String, PendingRequest>>,
-    home_dir: PathBuf,
+    home_mount_path: PathBuf,
 }
 
 impl DaemonCore {
@@ -134,7 +135,8 @@ impl DaemonCore {
 
         let mut generated_rule_id = None;
         if decision.duration_seconds != 0 {
-            let rule_path = rule_path_from_decision(&pending.request, &decision, &self.home_dir);
+            let rule_path =
+                rule_path_from_decision(&pending.request, &decision, &pending.actor_home);
             let expires_at = if decision.duration_seconds < 0 {
                 None
             } else {
@@ -187,6 +189,20 @@ impl DaemonCore {
     }
 
     async fn handle_kernel_event(self: &Arc<Self>, connection: &Connection, event: KernelEvent) -> anyhow::Result<()> {
+        let Some(actor_uid) = read_uid_for_pid(event.pid) else {
+            // If we cannot resolve process ownership, fail-open to avoid system stalls.
+            self.fanotify.respond(event.event_fd, true)?;
+            return Ok(());
+        };
+
+        // Never gate system/service accounts. This prevents boot/login freezes.
+        if actor_uid < 1000 {
+            self.fanotify.respond(event.event_fd, true)?;
+            return Ok(());
+        }
+
+        let actor_home = home_dir_for_uid(actor_uid, &self.home_mount_path)
+            .unwrap_or_else(|| self.home_mount_path.join(actor_uid.to_string()));
         let executable = read_executable_for_pid(event.pid);
         let app_name = Path::new(&executable)
             .file_name()
@@ -199,7 +215,7 @@ impl DaemonCore {
             return Ok(());
         }
 
-        let Some(layer) = select_protection_layer(&cfg, &event.target_path, &self.home_dir) else {
+        let Some(layer) = select_protection_layer(&cfg, &event.target_path, &actor_home) else {
             self.fanotify.respond(event.event_fd, true)?;
             return Ok(());
         };
@@ -211,7 +227,7 @@ impl DaemonCore {
             &event.target_path,
             event.permission,
             layer,
-            &self.home_dir,
+            &actor_home,
         ) {
             let allow = matches!(rule.action, Action::Allow);
             self.fanotify.respond(event.event_fd, allow)?;
@@ -248,6 +264,7 @@ impl DaemonCore {
                 PendingRequest {
                     request: request.clone(),
                     event_fd: event.event_fd,
+                    actor_home,
                 },
             );
         }
@@ -370,7 +387,6 @@ pub async fn run_daemon(opts: DaemonOpts) -> anyhow::Result<()> {
     let config = load_config(opts.config_path.as_deref())?;
     let db = Arc::new(Database::open(&opts.db_path)?);
     let fanotify = Arc::new(FanotifyMonitor::new(&opts.home_mount_path)?);
-    let home_dir = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/home"));
 
     let core = Arc::new(DaemonCore {
         db,
@@ -378,7 +394,7 @@ pub async fn run_daemon(opts: DaemonOpts) -> anyhow::Result<()> {
         config: RwLock::new(config),
         fanotify: fanotify.clone(),
         pending: Mutex::new(HashMap::new()),
-        home_dir,
+        home_mount_path: opts.home_mount_path.clone(),
     });
 
     let iface = FileSnitchDbus { core: core.clone() };
@@ -449,6 +465,33 @@ fn read_executable_for_pid(pid: u32) -> String {
     std::fs::read_link(format!("/proc/{pid}/exe"))
         .map(|p| p.to_string_lossy().to_string())
         .unwrap_or_else(|_| format!("/proc/{pid}/exe"))
+}
+
+fn read_uid_for_pid(pid: u32) -> Option<u32> {
+    let status = std::fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
+    let uid_line = status.lines().find(|line| line.starts_with("Uid:"))?;
+    let mut parts = uid_line.split_whitespace();
+    let _label = parts.next()?;
+    parts.next()?.parse::<u32>().ok()
+}
+
+fn home_dir_for_uid(uid: u32, home_mount_path: &Path) -> Option<PathBuf> {
+    let passwd = std::fs::read_to_string("/etc/passwd").ok()?;
+    for line in passwd.lines() {
+        if line.trim().is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let fields = line.split(':').collect::<Vec<_>>();
+        if fields.len() < 7 {
+            continue;
+        }
+        if let Ok(entry_uid) = fields[2].parse::<u32>() {
+            if entry_uid == uid {
+                return Some(PathBuf::from(fields[5]));
+            }
+        }
+    }
+    Some(home_mount_path.join(uid.to_string()))
 }
 
 fn rule_path_from_decision(request: &PermissionRequest, decision: &DecisionInput, home_dir: &Path) -> String {
