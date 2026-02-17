@@ -1,12 +1,14 @@
 [Unit]
 Description=FileSnitch daemon
 After=dbus.service
+StartLimitIntervalSec=5min
+StartLimitBurst=3
 
 [Service]
 Type=simple
 ExecStart=/usr/bin/filesnitchd --config /etc/filesnitch/config.toml
 Restart=on-failure
-RestartSec=2
+RestartSec=20
 User=root
 Group=root
 AmbientCapabilities=CAP_SYS_ADMIN CAP_DAC_READ_SEARCH

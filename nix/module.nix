@@ -78,11 +78,15 @@ in {
       description = "FileSnitch daemon";
       wantedBy = [ "multi-user.target" ];
       after = [ "dbus.service" ];
+      unitConfig = {
+        StartLimitIntervalSec = "5min";
+        StartLimitBurst = 3;
+      };
       serviceConfig = {
         Type = "simple";
         ExecStart = "${cfg.package}/bin/filesnitchd --config /etc/filesnitch/config.toml";
         Restart = "on-failure";
-        RestartSec = 2;
+        RestartSec = 20;
         User = "root";
         Group = "root";
         CapabilityBoundingSet = [ "CAP_SYS_ADMIN" "CAP_DAC_READ_SEARCH" ];
