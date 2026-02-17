@@ -1,4 +1,5 @@
 mod config;
+mod event_log;
 mod exclusions;
 mod fanotify;
 mod process_info;
