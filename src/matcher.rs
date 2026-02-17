@@ -2,14 +2,19 @@ use crate::models::{DaemonConfig, PermissionKind, ProtectionMode, Rule, RuleLaye
 use globset::Glob;
 use std::path::{Path, PathBuf};
 
-pub fn select_protection_layer(config: &DaemonConfig, target_path: &str, home_dir: &Path) -> Option<RuleLayer> {
-    if is_critical_path(config, target_path, home_dir) {
+pub fn select_protection_layer(
+    config: &DaemonConfig,
+    target_path: &str,
+    home_mount_path: &Path,
+    actor_home_dir: &Path,
+) -> Option<RuleLayer> {
+    if is_critical_path(config, target_path, actor_home_dir) {
         return Some(RuleLayer::Critical);
     }
     match config.protection_mode {
         ProtectionMode::ProtectEverything => {
             let target = Path::new(target_path);
-            if target.starts_with(home_dir) {
+            if target.starts_with(home_mount_path) {
                 Some(RuleLayer::Home)
             } else {
                 None
@@ -35,14 +40,15 @@ pub fn find_matching_rule(
     target_path: &str,
     permission: PermissionKind,
     layer: RuleLayer,
-    home_dir: &Path,
+    home_mount_path: &Path,
+    actor_home_dir: &Path,
 ) -> Option<Rule> {
     rules
         .iter()
         .filter(|r| r.layer == layer && r.status() == RuleStatus::Active)
         .filter(|r| r.executable == "*" || r.executable == executable)
         .filter(|r| r.permission.allows(permission))
-        .filter(|r| rule_path_matches(r, target_path, home_dir))
+        .filter(|r| rule_path_matches(r, target_path, home_mount_path, actor_home_dir))
         .max_by_key(|r| match r.scope {
             RuleScope::ExactFile => 100,
             RuleScope::Folder => 80,
@@ -53,14 +59,19 @@ pub fn find_matching_rule(
         .cloned()
 }
 
-fn rule_path_matches(rule: &Rule, target_path: &str, home_dir: &Path) -> bool {
+fn rule_path_matches(
+    rule: &Rule,
+    target_path: &str,
+    home_mount_path: &Path,
+    actor_home_dir: &Path,
+) -> bool {
     let target = Path::new(target_path);
     match rule.scope {
         RuleScope::ExactFile => target == Path::new(&rule.path),
         RuleScope::Folder => target.parent() == Some(Path::new(&rule.path)),
         RuleScope::FolderRecursive => target.starts_with(Path::new(&rule.path)),
-        RuleScope::Home => target.starts_with(home_dir),
-        RuleScope::Custom => glob_match(&expand_home_pattern(&rule.path, home_dir), target),
+        RuleScope::Home => target.starts_with(home_mount_path),
+        RuleScope::Custom => glob_match(&expand_home_pattern(&rule.path, actor_home_dir), target),
     }
 }
 
@@ -92,7 +103,12 @@ mod tests {
         };
         let home = Path::new("/home/alice");
 
-        let layer = select_protection_layer(&cfg, "/home/alice/.ssh/id_rsa", home);
+        let layer = select_protection_layer(
+            &cfg,
+            "/home/alice/.ssh/id_rsa",
+            Path::new("/home"),
+            home,
+        );
         assert_eq!(layer, Some(RuleLayer::Critical));
     }
 
@@ -118,6 +134,7 @@ mod tests {
             "/home/alice/notes/todo.txt",
             PermissionKind::Read,
             RuleLayer::Home,
+            Path::new("/home"),
             home,
         );
         assert_eq!(matched.map(|r| r.id), Some(rule.id));

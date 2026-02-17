@@ -8,6 +8,7 @@ use crate::models::{
 };
 use anyhow::{Context, anyhow};
 use std::collections::HashMap;
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -37,7 +38,6 @@ impl Default for DaemonOpts {
 struct PendingRequest {
     request: PermissionRequest,
     event_fd: i32,
-    actor_home: PathBuf,
 }
 
 pub struct DaemonCore {
@@ -136,7 +136,7 @@ impl DaemonCore {
         let mut generated_rule_id = None;
         if decision.duration_seconds != 0 {
             let rule_path =
-                rule_path_from_decision(&pending.request, &decision, &pending.actor_home);
+                rule_path_from_decision(&pending.request, &decision, &self.home_mount_path);
             let expires_at = if decision.duration_seconds < 0 {
                 None
             } else {
@@ -215,7 +215,43 @@ impl DaemonCore {
             return Ok(());
         }
 
-        let Some(layer) = select_protection_layer(&cfg, &event.target_path, &actor_home) else {
+        // Only enforce interactive permission gating when a frontend can actually answer.
+        // This avoids deadlocking desktop/login flows during boot or unattended operation.
+        if !has_interactive_frontend() {
+            self.fanotify.respond(event.event_fd, true)?;
+            let layer_for_log = select_protection_layer(
+                &cfg,
+                &event.target_path,
+                &self.home_mount_path,
+                &actor_home,
+            )
+            .unwrap_or(crate::models::RuleLayer::Home);
+            let request = PermissionRequest {
+                request_id: "no-frontend".to_string(),
+                pid: event.pid,
+                app_name,
+                executable,
+                target_path: event.target_path,
+                permission: event.permission,
+                layer: layer_for_log,
+                timestamp: now_ts(),
+            };
+            self.log_event(
+                &request,
+                Action::Allow,
+                None,
+                "no interactive frontend connected; fail-open".to_string(),
+            )
+            .await?;
+            return Ok(());
+        }
+
+        let Some(layer) = select_protection_layer(
+            &cfg,
+            &event.target_path,
+            &self.home_mount_path,
+            &actor_home,
+        ) else {
             self.fanotify.respond(event.event_fd, true)?;
             return Ok(());
         };
@@ -227,6 +263,7 @@ impl DaemonCore {
             &event.target_path,
             event.permission,
             layer,
+            &self.home_mount_path,
             &actor_home,
         ) {
             let allow = matches!(rule.action, Action::Allow);
@@ -264,7 +301,6 @@ impl DaemonCore {
                 PendingRequest {
                     request: request.clone(),
                     event_fd: event.event_fd,
-                    actor_home,
                 },
             );
         }
@@ -492,6 +528,80 @@ fn home_dir_for_uid(uid: u32, home_mount_path: &Path) -> Option<PathBuf> {
         }
     }
     Some(home_mount_path.join(uid.to_string()))
+}
+
+fn has_interactive_frontend() -> bool {
+    // UI process.
+    if process_basename_exists("filesnitch-ui") {
+        return true;
+    }
+
+    // CLI interactive watcher.
+    process_cmdline_matches(|cmdline| {
+        cmdline.iter().any(|arg| arg.ends_with("filesnitch"))
+            && cmdline.iter().any(|arg| arg == "watch")
+    })
+}
+
+fn process_basename_exists(name: &str) -> bool {
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return false;
+    };
+    for entry in entries.flatten() {
+        let file_name = entry.file_name();
+        if !file_name
+            .to_string_lossy()
+            .chars()
+            .all(|c| c.is_ascii_digit())
+        {
+            continue;
+        }
+
+        let exe_link = entry.path().join("exe");
+        let Ok(exe_path) = std::fs::read_link(exe_link) else {
+            continue;
+        };
+        if exe_path
+            .file_name()
+            .and_then(OsStr::to_str)
+            .is_some_and(|base| base == name)
+        {
+            return true;
+        }
+    }
+    false
+}
+
+fn process_cmdline_matches(pred: impl Fn(&[String]) -> bool) -> bool {
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return false;
+    };
+    for entry in entries.flatten() {
+        let file_name = entry.file_name();
+        if !file_name
+            .to_string_lossy()
+            .chars()
+            .all(|c| c.is_ascii_digit())
+        {
+            continue;
+        }
+        let cmdline_path = entry.path().join("cmdline");
+        let Ok(raw) = std::fs::read(cmdline_path) else {
+            continue;
+        };
+        if raw.is_empty() {
+            continue;
+        }
+        let args = raw
+            .split(|b| *b == 0)
+            .filter(|part| !part.is_empty())
+            .map(|part| String::from_utf8_lossy(part).to_string())
+            .collect::<Vec<_>>();
+        if pred(&args) {
+            return true;
+        }
+    }
+    false
 }
 
 fn rule_path_from_decision(request: &PermissionRequest, decision: &DecisionInput, home_dir: &Path) -> String {
