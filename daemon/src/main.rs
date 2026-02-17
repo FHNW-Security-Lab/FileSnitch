@@ -1,3 +1,5 @@
+mod process_info;
+
 use anyhow::Result;
 
 #[tokio::main]
