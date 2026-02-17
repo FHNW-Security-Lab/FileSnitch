@@ -73,6 +73,7 @@ Enable in your NixOS configuration:
 {
   imports = [ inputs.filesnitch.nixosModules.default ];
   services.filesnitch.enable = true;
+  services.filesnitch.startOnBoot = false; # safer default: D-Bus activation only
   services.filesnitch.protectionMode = "protect_everything";
   services.filesnitch.defaultActionOnTimeout = "deny";
   services.filesnitch.promptTimeoutSeconds = 30;

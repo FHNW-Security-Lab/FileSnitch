@@ -56,6 +56,16 @@ in {
       ];
       description = "Critical paths list.";
     };
+
+    startOnBoot = lib.mkOption {
+      type = lib.types.bool;
+      default = false;
+      description = ''
+        Whether to start filesnitchd automatically at boot.
+        When false, the daemon is started on-demand via D-Bus activation
+        (for example when filesnitch-ui or filesnitch CLI connects).
+      '';
+    };
   };
 
   config = lib.mkIf cfg.enable {
@@ -76,7 +86,7 @@ in {
 
     systemd.services.filesnitchd = {
       description = "FileSnitch daemon";
-      wantedBy = [ "multi-user.target" ];
+      wantedBy = lib.optional cfg.startOnBoot "multi-user.target";
       after = [ "dbus.service" ];
       unitConfig = {
         StartLimitIntervalSec = "5min";
