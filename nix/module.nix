@@ -1,11 +1,10 @@
-self:
-
-{ config, lib, pkgs, ... }:
+{ config, lib, pkgs, flakeInputs ? {}, ... }:
 
 with lib;
 
 let
   cfg = config.services.filesnitch;
+  filesnitch = flakeInputs.filesnitch or (throw "FileSnitch flake input not found in flakeInputs");
 
   configFile = pkgs.writeText "filesnitchd.toml" ''
     [general]
@@ -78,14 +77,14 @@ in
   config = mkIf cfg.enable {
     # Install the daemon package
     environment.systemPackages = [
-      self.packages.${pkgs.system}.filesnitchd
-      self.packages.${pkgs.system}.filesnitch-cli
-      self.packages.${pkgs.system}.filesnitch-ui
+      filesnitch.packages.${pkgs.system}.filesnitchd
+      filesnitch.packages.${pkgs.system}.filesnitch-cli
+      filesnitch.packages.${pkgs.system}.filesnitch-ui
     ];
 
     # D-Bus policy - allow daemon to own the bus name
     services.dbus.packages = [
-      self.packages.${pkgs.system}.filesnitchd
+      filesnitch.packages.${pkgs.system}.filesnitchd
     ];
 
     # Systemd service
@@ -96,7 +95,7 @@ in
       serviceConfig = {
         Type = "dbus";
         BusName = "org.filesnitch.Daemon";
-        ExecStart = "${self.packages.${pkgs.system}.filesnitchd}/bin/filesnitchd ${configFile}";
+        ExecStart = "${filesnitch.packages.${pkgs.system}.filesnitchd}/bin/filesnitchd ${configFile}";
         Restart = "on-failure";
         RestartSec = 5;
         StartLimitBurst = 3;

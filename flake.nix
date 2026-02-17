@@ -33,6 +33,6 @@
         };
       }
     ) // {
-      nixosModules.default = import ./nix/module.nix self;
+      nixosModules.default = import ./nix/module.nix;
     };
 }
