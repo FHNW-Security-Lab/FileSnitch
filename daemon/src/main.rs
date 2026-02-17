@@ -1,4 +1,5 @@
 mod config;
+mod exclusions;
 mod process_info;
 
 use std::path::PathBuf;
