@@ -1,0 +1,36 @@
+[general]
+# "learning" or "enforce"
+operation_mode = "learning"
+# "critical_only" or "everything"
+protection_mode = "critical_only"
+# "deny" or "allow"
+default_action = "deny"
+# Seconds before auto-applying default action
+prompt_timeout = 30
+# Path to the SQLite database
+db_path = "/var/lib/filesnitchd/rules.db"
+# Log level: "error", "warn", "info", "debug", "trace"
+log_level = "info"
+
+[critical_paths]
+paths = [
+    ".ssh",
+    ".gnupg",
+    ".bashrc",
+    ".zshrc",
+    ".profile",
+    ".bash_profile",
+    ".aws",
+    ".kube",
+    ".gitconfig",
+    ".config/git",
+    ".mozilla",
+    ".config/google-chrome",
+    ".config/chromium",
+    ".thunderbird",
+    ".config/Code",
+]
+
+[excluded_executables]
+# Additional user-defined exclusions (beyond built-in list)
+paths = []

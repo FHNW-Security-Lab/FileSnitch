@@ -1,0 +1,5 @@
+[D-BUS Service]
+Name=org.filesnitch.Daemon
+Exec=/usr/bin/filesnitchd
+User=root
+SystemdService=filesnitchd.service
