@@ -2,6 +2,23 @@
 let
   cfg = config.services.filesnitch;
   toml = pkgs.formats.toml { };
+  dbusPolicy = ''
+    <!DOCTYPE busconfig PUBLIC
+      "-//freedesktop//DTD D-BUS Bus Configuration 1.0//EN"
+      "http://www.freedesktop.org/standards/dbus/1.0/busconfig.dtd">
+    <busconfig>
+      <policy user="root">
+        <allow own="org.filesnitch.Daemon"/>
+        <allow send_destination="org.filesnitch.Daemon"/>
+        <allow receive_sender="org.filesnitch.Daemon"/>
+      </policy>
+
+      <policy context="default">
+        <allow send_destination="org.filesnitch.Daemon"/>
+        <allow receive_sender="org.filesnitch.Daemon"/>
+      </policy>
+    </busconfig>
+  '';
 in {
   options.services.filesnitch = {
     enable = lib.mkEnableOption "FileSnitch daemon";
@@ -70,6 +87,7 @@ in {
 
   config = lib.mkIf cfg.enable {
     services.dbus.packages = [ cfg.package ];
+    environment.etc."dbus-1/system.d/org.filesnitch.Daemon.conf".text = dbusPolicy;
 
     environment.etc."filesnitch/config.toml".source = toml.generate "filesnitch-config.toml" {
       protection_mode = if cfg.protectionMode == "protect_everything"
@@ -97,6 +115,7 @@ in {
         ExecStart = "${cfg.package}/bin/filesnitchd --config /etc/filesnitch/config.toml";
         Restart = "on-failure";
         RestartSec = 20;
+        RestartPreventExitStatus = [ "1" ];
         User = "root";
         Group = "root";
         CapabilityBoundingSet = [ "CAP_SYS_ADMIN" "CAP_DAC_READ_SEARCH" ];

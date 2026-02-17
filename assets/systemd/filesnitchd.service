@@ -9,6 +9,7 @@ Type=simple
 ExecStart=/usr/bin/filesnitchd --config /etc/filesnitch/config.toml
 Restart=on-failure
 RestartSec=20
+RestartPreventExitStatus=1
 User=root
 Group=root
 AmbientCapabilities=CAP_SYS_ADMIN CAP_DAC_READ_SEARCH
