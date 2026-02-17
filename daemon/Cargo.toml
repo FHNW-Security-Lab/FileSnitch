@@ -1,0 +1,34 @@
+[package]
+name = "filesnitchd"
+version = "0.1.0"
+edition = "2021"
+description = "FileSnitch daemon - interactive file access firewall"
+license = "GPL-3.0"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+zbus = { version = "5", default-features = false, features = ["tokio"] }
+nix = { version = "0.29", features = ["fanotify", "fs", "process", "signal"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+sd-notify = "0.4"
+anyhow = "1"
+chrono = { version = "0.4", features = ["serde"] }
+glob-match = "0.2"
+libc = "0.2"
+
+[package.metadata.deb]
+maintainer = "FileSnitch Contributors"
+copyright = "2026, FileSnitch Contributors"
+depends = "$auto, dbus"
+section = "admin"
+priority = "optional"
+assets = [
+    ["target/release/filesnitchd", "usr/bin/", "755"],
+    ["../dbus/org.filesnitch.Daemon.conf", "etc/dbus-1/system.d/", "644"],
+    ["../systemd/filesnitchd.service", "lib/systemd/system/", "644"],
+    ["../config/filesnitchd.toml", "etc/filesnitch/", "644"],
+]

@@ -1,0 +1,1 @@
+"""FileSnitch command-line interface."""
