@@ -1,7 +1,12 @@
 { lib, craneLib, pkg-config, dbus, sqlite, openssl }:
 
 let
-  src = craneLib.cleanCargoSource (craneLib.path ../..);
+  # Raw source (entire flake root) for non-Cargo files (dbus, systemd, config)
+  rawSrc = ../.;
+
+  # Cleaned source for cargo build (only Cargo-related files)
+  src = craneLib.cleanCargoSource (craneLib.path ../.);
+
   commonArgs = {
     inherit src;
     pname = "filesnitchd";
@@ -21,27 +26,27 @@ craneLib.buildPackage (commonArgs // {
 
   postInstall = ''
     # Install D-Bus configuration
-    install -Dm644 $src/dbus/org.filesnitch.Daemon.conf \
+    install -Dm644 ${rawSrc}/dbus/org.filesnitch.Daemon.conf \
       $out/share/dbus-1/system.d/org.filesnitch.Daemon.conf
 
     # Install D-Bus service activation file
-    install -Dm644 $src/dbus/org.filesnitch.Daemon.service \
+    install -Dm644 ${rawSrc}/dbus/org.filesnitch.Daemon.service \
       $out/share/dbus-1/system-services/org.filesnitch.Daemon.service
 
     # Fix the Exec path in the D-Bus service file
     substituteInPlace $out/share/dbus-1/system-services/org.filesnitch.Daemon.service \
-      --replace "/usr/bin/filesnitchd" "$out/bin/filesnitchd"
+      --replace-fail "/usr/bin/filesnitchd" "$out/bin/filesnitchd"
 
     # Install systemd service
-    install -Dm644 $src/systemd/filesnitchd.service \
+    install -Dm644 ${rawSrc}/systemd/filesnitchd.service \
       $out/lib/systemd/system/filesnitchd.service
 
     # Fix ExecStart path in systemd service
     substituteInPlace $out/lib/systemd/system/filesnitchd.service \
-      --replace "/usr/bin/filesnitchd" "$out/bin/filesnitchd"
+      --replace-fail "/usr/bin/filesnitchd" "$out/bin/filesnitchd"
 
     # Install default config
-    install -Dm644 $src/config/filesnitchd.toml \
+    install -Dm644 ${rawSrc}/config/filesnitchd.toml \
       $out/etc/filesnitch/filesnitchd.toml
   '';
 
