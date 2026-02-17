@@ -1,2 +1,6 @@
 /target
 /.direnv
+__pycache__/
+*.pyc
+*.egg-info/
+/result
