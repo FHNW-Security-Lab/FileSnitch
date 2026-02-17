@@ -2,7 +2,7 @@
 let
   cfg = config.services.filesnitch;
   toml = pkgs.formats.toml { };
-  dbusPolicy = ''
+  dbusPolicyPkg = pkgs.writeTextDir "share/dbus-1/system.d/org.filesnitch.Daemon.conf" ''
     <!DOCTYPE busconfig PUBLIC
       "-//freedesktop//DTD D-BUS Bus Configuration 1.0//EN"
       "http://www.freedesktop.org/standards/dbus/1.0/busconfig.dtd">
@@ -86,8 +86,7 @@ in {
   };
 
   config = lib.mkIf cfg.enable {
-    services.dbus.packages = [ cfg.package ];
-    environment.etc."dbus-1/system.d/org.filesnitch.Daemon.conf".text = dbusPolicy;
+    services.dbus.packages = [ cfg.package dbusPolicyPkg ];
 
     environment.etc."filesnitch/config.toml".source = toml.generate "filesnitch-config.toml" {
       protection_mode = if cfg.protectionMode == "protect_everything"
