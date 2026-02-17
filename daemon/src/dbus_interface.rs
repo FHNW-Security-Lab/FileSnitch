@@ -496,7 +496,7 @@ impl FilesnitchInterface {
 
     /// Emitted when a permission request needs user input.
     #[zbus(signal)]
-    async fn permission_request(
+    pub async fn permission_request(
         emitter: &SignalEmitter<'_>,
         request_id: u64,
         pid: u32,

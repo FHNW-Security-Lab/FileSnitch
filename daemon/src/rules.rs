@@ -170,10 +170,18 @@ fn row_to_rule(row: &rusqlite::Row<'_>) -> rusqlite::Result<Rule> {
     let action_str: String = row.get(4)?;
 
     let permission = parse_permission(&perm_str).map_err(|e| {
-        rusqlite::Error::FromSqlConversionFailure(3, rusqlite::types::Type::Text, Box::new(e))
+        rusqlite::Error::FromSqlConversionFailure(
+            3,
+            rusqlite::types::Type::Text,
+            e.to_string().into(),
+        )
     })?;
     let action = parse_action(&action_str).map_err(|e| {
-        rusqlite::Error::FromSqlConversionFailure(4, rusqlite::types::Type::Text, Box::new(e))
+        rusqlite::Error::FromSqlConversionFailure(
+            4,
+            rusqlite::types::Type::Text,
+            e.to_string().into(),
+        )
     })?;
 
     let created_str: String = row.get(6)?;
@@ -574,14 +582,20 @@ impl RuleStore {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
 
-    /// Create a RuleStore backed by an in-memory SQLite database.
+    static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    /// Create a RuleStore backed by a unique temporary SQLite database.
     fn temp_store() -> RuleStore {
-        // Use a temporary file so `new` can run its full init logic.
-        let dir = std::env::temp_dir().join(format!("filesnitch-test-{}", std::process::id()));
+        let id = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "filesnitch-test-{}-{}",
+            std::process::id(),
+            id
+        ));
         std::fs::create_dir_all(&dir).unwrap();
         let db_path = dir.join("test_rules.db");
-        // Remove leftover database from a previous run.
         let _ = std::fs::remove_file(&db_path);
         RuleStore::new(&db_path).expect("failed to create test store")
     }

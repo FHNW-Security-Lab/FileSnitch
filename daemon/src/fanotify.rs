@@ -44,7 +44,7 @@ pub fn init_fanotify() -> Result<Fanotify> {
     fan.mark(
         MarkFlags::FAN_MARK_ADD | MarkFlags::FAN_MARK_FILESYSTEM,
         MaskFlags::FAN_OPEN_PERM | MaskFlags::FAN_ACCESS_PERM,
-        None::<&std::os::fd::BorrowedFd<'_>>,
+        None::<std::os::unix::io::RawFd>,
         Some("/home"),
     )
     .context("failed to mark /home for fanotify")?;
@@ -198,9 +198,9 @@ fn event_reader_loop(
             };
 
             let response = if allow {
-                Response::Allow
+                Response::FAN_ALLOW
             } else {
-                Response::Deny
+                Response::FAN_DENY
             };
 
             let fan_response = FanotifyResponse::new(fd, response);
@@ -234,7 +234,7 @@ fn auto_allow(fan: &Fanotify, fd: &impl AsRawFd) {
     // We need a BorrowedFd to construct the response. The fd from the
     // event is already borrowed, so we can use it directly.
     let borrowed = unsafe { std::os::fd::BorrowedFd::borrow_raw(raw_fd) };
-    let response = FanotifyResponse::new(borrowed, Response::Allow);
+    let response = FanotifyResponse::new(borrowed, Response::FAN_ALLOW);
     if let Err(e) = fan.write_response(response) {
         tracing::error!(
             raw_fd,
