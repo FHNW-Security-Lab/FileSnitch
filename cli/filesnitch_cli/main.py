@@ -196,6 +196,15 @@ def log(follow, app, path, limit):
             pass
 
 
+@cli.command()
+def watch():
+    """Interactive mode - approve/deny file access requests in real time."""
+    client = get_client()
+    from filesnitch_cli.watch import WatchMode
+    watcher = WatchMode(client)
+    watcher.run()
+
+
 @cli.group()
 def config():
     """View and change configuration."""
