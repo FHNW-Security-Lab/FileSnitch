@@ -17,6 +17,7 @@ use tracing::{error, info, warn};
 use zbus::{Connection, ConnectionBuilder, SignalContext, interface};
 
 const DEFAULT_DB_PATH: &str = "/var/lib/filesnitch/filesnitch.db";
+const MAX_PENDING_REQUESTS: usize = 64;
 
 #[derive(Debug, Clone)]
 pub struct DaemonOpts {
@@ -214,6 +215,10 @@ impl DaemonCore {
             self.fanotify.respond(event.event_fd, true)?;
             return Ok(());
         }
+        if should_bypass_for_desktop_stability(&executable) {
+            self.fanotify.respond(event.event_fd, true)?;
+            return Ok(());
+        }
 
         // Only enforce interactive permission gating when a frontend can actually answer.
         // This avoids deadlocking desktop/login flows during boot or unattended operation.
@@ -296,6 +301,20 @@ impl DaemonCore {
 
         {
             let mut map = self.pending.lock().await;
+            if map.len() >= MAX_PENDING_REQUESTS {
+                drop(map);
+                self.fanotify.respond(event.event_fd, true)?;
+                self.log_event(
+                    &request,
+                    Action::Allow,
+                    None,
+                    format!(
+                        "pending queue backpressure (>{MAX_PENDING_REQUESTS}), fail-open"
+                    ),
+                )
+                .await?;
+                return Ok(());
+            }
             map.insert(
                 request.request_id.clone(),
                 PendingRequest {
@@ -602,6 +621,36 @@ fn process_cmdline_matches(pred: impl Fn(&[String]) -> bool) -> bool {
         }
     }
     false
+}
+
+fn should_bypass_for_desktop_stability(executable: &str) -> bool {
+    let base = Path::new(executable)
+        .file_name()
+        .and_then(OsStr::to_str)
+        .unwrap_or_default();
+    matches!(
+        base,
+        // FileSnitch components must never self-intercept.
+        "filesnitchd"
+            | "filesnitch-ui"
+            | "filesnitch"
+            // Desktop/session core processes.
+            | "gnome-shell"
+            | "gnome-session-binary"
+            | "dbus-daemon"
+            | "Xwayland"
+            | "Xorg"
+            | "systemd"
+            | "systemd-user-runtime-dir"
+            | "wireplumber"
+            | "pipewire"
+            | "pipewire-pulse"
+            | "pulseaudio"
+            | "ibus-daemon"
+            | "kded6"
+            | "kwin_wayland"
+            | "plasmashell"
+    )
 }
 
 fn rule_path_from_decision(request: &PermissionRequest, decision: &DecisionInput, home_dir: &Path) -> String {
