@@ -1,4 +1,6 @@
 mod config;
+mod dbus_interface;
+mod decision;
 mod event_log;
 mod exclusions;
 mod fanotify;
