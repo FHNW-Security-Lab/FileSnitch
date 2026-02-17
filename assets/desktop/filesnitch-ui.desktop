@@ -1,9 +1,0 @@
-[Desktop Entry]
-Type=Application
-Name=FileSnitch
-Comment=FileSnitch settings and prompts
-Exec=filesnitch-ui
-Icon=security-high
-Terminal=false
-Categories=Security;System;
-StartupNotify=true

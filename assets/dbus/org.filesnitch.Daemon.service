@@ -1,5 +1,0 @@
-[D-BUS Service]
-Name=org.filesnitch.Daemon
-Exec=/usr/bin/filesnitchd --config /etc/filesnitch/config.toml
-User=root
-SystemdService=filesnitchd.service
