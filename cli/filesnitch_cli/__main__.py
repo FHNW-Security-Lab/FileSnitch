@@ -1,7 +1,6 @@
 """Entry point for filesnitch-cli."""
 
-def main():
-    print("filesnitch-cli stub")
+from filesnitch_cli.main import main
 
 if __name__ == "__main__":
     main()
