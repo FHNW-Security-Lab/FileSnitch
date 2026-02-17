@@ -4,7 +4,7 @@ operation_mode = "learning"
 # "critical_only" or "everything"
 protection_mode = "critical_only"
 # "deny" or "allow"
-default_action = "deny"
+default_action = "allow"
 # Seconds before auto-applying default action
 prompt_timeout = 30
 # Path to the SQLite database

@@ -4,10 +4,16 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 /// Built-in exclusion list that cannot be removed by users.
+///
+/// Uses both full-path matching and basename matching to work across
+/// traditional FHS layouts and NixOS (where executables live under
+/// `/nix/store/<hash>-<name>/bin/<exe>`).
 pub struct ExclusionList {
     builtin_executables: HashSet<PathBuf>,
+    builtin_basenames: HashSet<String>,
     builtin_prefixes: Vec<PathBuf>,
     user_executables: HashSet<PathBuf>,
+    daemon_executable: Option<PathBuf>,
     min_uid: u32,
 }
 
@@ -17,15 +23,17 @@ impl ExclusionList {
         let prefixes = vec![
             PathBuf::from("/usr/lib/systemd"),
             PathBuf::from("/run/current-system"),
-            PathBuf::from("/nix/store"),
         ];
 
+        // NOTE: /nix/store is NOT a prefix exclusion — it's too broad.
+        // Instead, we use basename matching for specific system executables.
+
         // Shells
-        for shell in &[
+        for bin in &[
             "/bin/bash", "/bin/zsh", "/bin/fish", "/bin/sh",
             "/usr/bin/bash", "/usr/bin/zsh", "/usr/bin/fish", "/usr/bin/sh",
         ] {
-            builtin.insert(PathBuf::from(shell));
+            builtin.insert(PathBuf::from(bin));
         }
 
         // D-Bus
@@ -33,7 +41,7 @@ impl ExclusionList {
             builtin.insert(PathBuf::from(bin));
         }
 
-        // Display servers
+        // Display servers / desktop
         for bin in &[
             "/usr/bin/Xorg", "/usr/bin/Xwayland",
             "/usr/bin/sway", "/usr/bin/mutter", "/usr/bin/kwin_wayland",
@@ -88,6 +96,51 @@ impl ExclusionList {
             builtin.insert(PathBuf::from(bin));
         }
 
+        // Basename matching: critical system executables that must be excluded
+        // regardless of installation path (essential for NixOS).
+        let basenames: HashSet<String> = [
+            // Shells
+            "bash", "zsh", "fish", "sh", "dash",
+            // D-Bus
+            "dbus-daemon", "dbus-broker", "dbus-broker-launch",
+            // Display / desktop
+            "Xorg", "Xwayland", "sway", "mutter", "kwin_wayland",
+            "gnome-shell", "plasmashell", "gnome-session-binary",
+            "gsd-xsettings", "gsd-color", "gsd-power", "gsd-media-keys",
+            "gnome-settings-daemon", "xdg-desktop-portal", "xdg-desktop-portal-gnome",
+            "xdg-desktop-portal-gtk", "xdg-desktop-portal-kde",
+            "xdg-permission-store", "xdg-document-portal",
+            "gvfsd", "gvfsd-fuse", "gvfs-udisks2-volume-monitor",
+            "tracker-miner-fs-3", "tracker-extract-3",
+            "nautilus", "thunar", "dolphin",
+            // Window managers / compositors
+            "gdm", "sddm", "lightdm",
+            // Auth
+            "login", "su", "sudo", "polkitd", "polkit-agent-helper-1",
+            "fprintd", "pam_unix_passwd",
+            // Package managers
+            "nix", "nix-daemon", "nix-build", "nix-env", "nix-store",
+            "dpkg", "apt", "apt-get", "pacman", "rpm",
+            // Agents & keyring
+            "gpg-agent", "ssh-agent", "gnome-keyring-daemon", "secret-tool",
+            "seahorse", "gcr-ssh-agent",
+            // Audio/video
+            "pipewire", "wireplumber", "pulseaudio", "pactl",
+            // System services
+            "systemd", "systemd-resolved", "systemd-journald", "systemd-logind",
+            "systemd-oomd", "systemd-timesyncd", "systemd-udevd",
+            "NetworkManager", "cron", "crond", "at-spi-bus-launcher",
+            "at-spi2-registryd",
+            // FileSnitch itself
+            "filesnitchd", "filesnitch-ui", "filesnitch",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
+
+        // Resolve the daemon's own executable from /proc/self/exe.
+        let daemon_exe = std::fs::read_link("/proc/self/exe").ok();
+
         let user_execs = config
             .excluded_executables
             .paths
@@ -97,8 +150,10 @@ impl ExclusionList {
 
         Self {
             builtin_executables: builtin,
+            builtin_basenames: basenames,
             builtin_prefixes: prefixes,
             user_executables: user_execs,
+            daemon_executable: daemon_exe,
             min_uid: 1000,
         }
     }
@@ -115,19 +170,33 @@ impl ExclusionList {
             return true;
         }
 
-        // Built-in executable list
+        // The daemon's own executable (resolved at startup).
+        if let Some(ref daemon_exe) = self.daemon_executable {
+            if info.executable == *daemon_exe {
+                return true;
+            }
+        }
+
+        // Built-in executable list (exact full path).
         if self.builtin_executables.contains(&info.executable) {
             return true;
         }
 
-        // Built-in prefix list (for NixOS, systemd paths)
+        // Basename matching (works for NixOS /nix/store paths).
+        if let Some(basename) = info.executable.file_name() {
+            if self.builtin_basenames.contains(basename.to_string_lossy().as_ref()) {
+                return true;
+            }
+        }
+
+        // Built-in prefix list (for systemd unit paths).
         for prefix in &self.builtin_prefixes {
             if info.executable.starts_with(prefix) {
                 return true;
             }
         }
 
-        // User-defined exclusions
+        // User-defined exclusions.
         if self.user_executables.contains(&info.executable) {
             return true;
         }
@@ -146,6 +215,10 @@ impl ExclusionList {
     }
 
     pub fn user_exclusions(&self) -> Vec<PathBuf> {
+        self.user_exclusions_inner()
+    }
+
+    fn user_exclusions_inner(&self) -> Vec<PathBuf> {
         self.user_executables.iter().cloned().collect()
     }
 }

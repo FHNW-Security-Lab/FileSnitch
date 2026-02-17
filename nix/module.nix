@@ -40,8 +40,8 @@ in
 
     defaultAction = mkOption {
       type = types.enum [ "deny" "allow" ];
-      default = "deny";
-      description = "Default action when prompt times out";
+      default = "allow";
+      description = "Default action when prompt times out (use 'allow' until setup is stable)";
     };
 
     promptTimeout = mkOption {
@@ -101,6 +101,13 @@ in
         StartLimitBurst = 3;
         WatchdogSec = 30;
         StateDirectory = "filesnitchd";
+
+        # Resource limits to prevent runaway consumption
+        MemoryMax = "256M";
+        MemoryHigh = "128M";
+        CPUQuota = "50%";
+        LimitNOFILE = 4096;
+        TasksMax = 64;
       };
     };
   };

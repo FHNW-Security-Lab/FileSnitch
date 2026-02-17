@@ -113,7 +113,7 @@ async fn main() -> Result<()> {
     // Channels between the fanotify reader thread and the async event loop.
     // event_tx/event_rx: fanotify events from the reader to the decision loop.
     // response_tx/response_rx: (request_id, allow) back to the reader.
-    let (event_tx, mut event_rx) = mpsc::channel(256);
+    let (event_tx, mut event_rx) = mpsc::channel(1024);
     let (response_tx, response_rx) = std::sync::mpsc::channel::<(u64, bool)>();
 
     let _fanotify_handle = if is_root {
@@ -168,62 +168,71 @@ async fn main() -> Result<()> {
 
     let event_loop_handle = tokio::spawn(async move {
         while let Some(event) = event_rx.recv().await {
-            let request_id = event.request_id;
-            let pid = event.pid;
-            let target_path = event.target_path.clone();
-            let access_type_str = match event.access_type {
-                fanotify::AccessType::Read => "read",
-                fanotify::AccessType::Write => "write",
-            };
+            // Spawn a task per event so decisions don't block each other.
+            // This is critical: decide() may wait up to prompt_timeout seconds
+            // for a user response. Without spawning, one slow event blocks all others.
+            let engine = engine_loop.clone();
+            let event_log = event_log_loop.clone();
+            let pcache = process_cache_loop.clone();
+            let resp_tx = response_tx.clone();
 
-            // Resolve process info for logging (best effort).
-            let executable = process_cache_loop
-                .resolve(pid)
-                .map(|info| info.executable)
-                .unwrap_or_else(|_| PathBuf::from("<unknown>"));
+            tokio::spawn(async move {
+                let request_id = event.request_id;
+                let pid = event.pid;
+                let target_path = event.target_path.clone();
+                let access_type_str = match event.access_type {
+                    fanotify::AccessType::Read => "read",
+                    fanotify::AccessType::Write => "write",
+                };
 
-            // Call the decision engine (may block on user prompt with timeout).
-            let (allowed, reason) = engine_loop.decide(&event).await;
+                // Resolve process info for logging (best effort).
+                let executable = pcache
+                    .resolve(pid)
+                    .map(|info| info.executable)
+                    .unwrap_or_else(|_| PathBuf::from("<unknown>"));
 
-            // Send the response back to the fanotify reader thread.
-            if response_tx.send((request_id, allowed)).is_err() {
-                tracing::error!(
+                // Call the decision engine (may wait for user prompt with timeout).
+                let (allowed, reason) = engine.decide(&event).await;
+
+                // Send the response back to the fanotify responder thread.
+                if resp_tx.send((request_id, allowed)).is_err() {
+                    tracing::error!(
+                        request_id,
+                        "fanotify response channel closed, cannot send response"
+                    );
+                }
+
+                // Extract rule_id from reason if it matches "rule:<id>".
+                let rule_id = if reason.starts_with("rule:") {
+                    reason[5..].parse::<i64>().ok()
+                } else {
+                    None
+                };
+
+                let decision_str = if allowed { "allow" } else { "deny" };
+
+                // Log the event to the database.
+                if let Err(e) = event_log.log_event(
+                    pid,
+                    &executable,
+                    &target_path,
+                    access_type_str,
+                    decision_str,
+                    &reason,
+                    rule_id,
+                ) {
+                    tracing::error!(error = %e, "failed to log event");
+                }
+
+                tracing::debug!(
                     request_id,
-                    "fanotify response channel closed, cannot send response"
+                    pid,
+                    path = %target_path.display(),
+                    decision = decision_str,
+                    reason = %reason,
+                    "event processed"
                 );
-                break;
-            }
-
-            // Extract rule_id from reason if it matches "rule:<id>".
-            let rule_id = if reason.starts_with("rule:") {
-                reason[5..].parse::<i64>().ok()
-            } else {
-                None
-            };
-
-            let decision_str = if allowed { "allow" } else { "deny" };
-
-            // Log the event to the database.
-            if let Err(e) = event_log_loop.log_event(
-                pid,
-                &executable,
-                &target_path,
-                access_type_str,
-                decision_str,
-                &reason,
-                rule_id,
-            ) {
-                tracing::error!(error = %e, "failed to log event");
-            }
-
-            tracing::debug!(
-                request_id,
-                pid,
-                path = %target_path.display(),
-                decision = decision_str,
-                reason = %reason,
-                "event processed"
-            );
+            });
         }
 
         tracing::info!("event loop exiting");

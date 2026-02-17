@@ -80,7 +80,7 @@ impl Default for Config {
             general: GeneralConfig {
                 operation_mode: OperationMode::Learning,
                 protection_mode: ProtectionMode::CriticalOnly,
-                default_action: DefaultAction::Deny,
+                default_action: DefaultAction::Allow,
                 prompt_timeout: 30,
                 db_path: PathBuf::from("/var/lib/filesnitchd/rules.db"),
                 log_level: "info".to_string(),
