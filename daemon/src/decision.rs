@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use chrono::Utc;
-use tokio::sync::{oneshot, RwLock};
+use tokio::sync::{mpsc, oneshot, RwLock};
 
 use crate::config::{Config, DefaultAction, OperationMode, ProtectionMode};
 use crate::exclusions::ExclusionList;
@@ -55,6 +55,12 @@ pub struct UserDecision {
 // DecisionEngine
 // ---------------------------------------------------------------------------
 
+/// Notification payload sent when a new pending request is created.
+///
+/// Contains the fields needed to emit a D-Bus `PermissionRequest` signal:
+/// `(request_id, pid, executable, target_path, access_type, app_name, timestamp)`.
+pub type PendingNotification = (u64, i32, String, String, String, String, u64);
+
 /// The core decision engine that sits between fanotify events and D-Bus.
 ///
 /// For each incoming fanotify permission event the engine:
@@ -70,6 +76,7 @@ pub struct DecisionEngine {
     pub exclusions: Arc<RwLock<ExclusionList>>,
     pub process_cache: Arc<ProcessInfoCache>,
     pub pending_requests: Arc<RwLock<HashMap<u64, PendingRequest>>>,
+    pub pending_notify_tx: mpsc::UnboundedSender<PendingNotification>,
 }
 
 impl DecisionEngine {
@@ -80,6 +87,7 @@ impl DecisionEngine {
         exclusions: Arc<RwLock<ExclusionList>>,
         process_cache: Arc<ProcessInfoCache>,
         pending_requests: Arc<RwLock<HashMap<u64, PendingRequest>>>,
+        pending_notify_tx: mpsc::UnboundedSender<PendingNotification>,
     ) -> Self {
         Self {
             config,
@@ -87,6 +95,7 @@ impl DecisionEngine {
             exclusions,
             process_cache,
             pending_requests,
+            pending_notify_tx,
         }
     }
 
@@ -229,6 +238,17 @@ impl DecisionEngine {
             let mut pending_map = self.pending_requests.write().await;
             pending_map.insert(request_id, pending);
         }
+
+        // Notify the main loop so it can emit a D-Bus PermissionRequest signal.
+        let _ = self.pending_notify_tx.send((
+            request_id,
+            event.pid,
+            process_info.executable.to_string_lossy().to_string(),
+            target_str.to_string(),
+            access_type_str.to_string(),
+            app_name.clone(),
+            now_ts,
+        ));
 
         tracing::info!(
             request_id,
@@ -516,12 +536,14 @@ mod tests {
         let _ = std::fs::remove_file(&db_path);
         let rules = RuleStore::new(&db_path).unwrap();
 
+        let (notify_tx, _notify_rx) = mpsc::unbounded_channel();
         let engine = DecisionEngine::new(
             Arc::new(RwLock::new(config)),
             Arc::new(rules),
             Arc::new(RwLock::new(exclusions)),
             Arc::new(process_cache),
             Arc::new(RwLock::new(HashMap::new())),
+            notify_tx,
         );
 
         let critical_paths = vec![
