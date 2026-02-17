@@ -1,5 +1,6 @@
 mod config;
 mod exclusions;
+mod fanotify;
 mod process_info;
 
 use std::path::PathBuf;
