@@ -1,7 +1,7 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::os::fd::{AsRawFd, BorrowedFd};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -21,7 +21,12 @@ const MAX_PENDING: usize = 512;
 
 /// How long a pending event can wait before being auto-allowed.
 /// This is a safety net — the decision engine has its own prompt timeout.
-const RESPONSE_TIMEOUT: Duration = Duration::from_secs(60);
+/// Kept short (10s) so blocked processes don't freeze the system for long.
+const RESPONSE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// UID threshold for system processes. Processes with UID below this
+/// are auto-allowed in the reader thread without hitting the async pipeline.
+const SYSTEM_UID_THRESHOLD: u32 = 1000;
 
 /// A fanotify permission event to be decided on.
 #[derive(Debug)]
@@ -54,14 +59,14 @@ pub fn init_fanotify() -> Result<Fanotify> {
     .context("failed to init fanotify (need CAP_SYS_ADMIN)")?;
 
     fan.mark(
-        MarkFlags::FAN_MARK_ADD | MarkFlags::FAN_MARK_FILESYSTEM,
-        MaskFlags::FAN_OPEN_PERM | MaskFlags::FAN_ACCESS_PERM,
+        MarkFlags::FAN_MARK_ADD | MarkFlags::FAN_MARK_MOUNT,
+        MaskFlags::FAN_OPEN_PERM,
         None::<std::os::unix::io::RawFd>,
         Some("/home"),
     )
-    .context("failed to mark /home for fanotify")?;
+    .context("failed to mark /home mount for fanotify")?;
 
-    tracing::info!("fanotify initialized, watching /home filesystem for permission events");
+    tracing::info!("fanotify initialized, watching /home mount for open permission events");
     Ok(fan)
 }
 
@@ -69,8 +74,10 @@ pub fn init_fanotify() -> Result<Fanotify> {
 ///
 /// Creates three threads:
 /// - **reader**: reads fanotify events, dups fds, sends events to the
-///   decision engine without blocking. Events from the daemon's own PID
-///   are auto-allowed immediately.
+///   decision engine without blocking. Events from the daemon's own PID,
+///   system processes (UID < 1000), and known excluded basenames are
+///   auto-allowed immediately in the reader thread. In learning mode,
+///   ALL events are auto-allowed without hitting the async pipeline.
 /// - **responder**: receives decisions from the engine and writes fanotify
 ///   responses using the duped fds.
 /// - **timeout monitor**: periodically checks for stale pending events
@@ -82,6 +89,8 @@ pub fn spawn_event_reader(
     fan: Fanotify,
     event_tx: mpsc::Sender<FanotifyEvent>,
     response_rx: std::sync::mpsc::Receiver<(u64, bool)>,
+    learning_mode: Arc<AtomicBool>,
+    exclusion_basenames: Arc<HashSet<String>>,
 ) -> JoinHandle<()> {
     let fan = Arc::new(fan);
     let pending_fds: Arc<Mutex<HashMap<u64, PendingFd>>> =
@@ -113,7 +122,14 @@ pub fn spawn_event_reader(
         .name("fanotify-reader".into())
         .spawn(move || {
             tracing::info!("fanotify reader thread started");
-            event_reader_loop(&fan, &event_tx, &pending_fds, my_pid);
+            event_reader_loop(
+                &fan,
+                &event_tx,
+                &pending_fds,
+                my_pid,
+                &learning_mode,
+                &exclusion_basenames,
+            );
             tracing::info!("fanotify reader thread exiting");
         })
         .expect("failed to spawn fanotify reader thread")
@@ -121,11 +137,23 @@ pub fn spawn_event_reader(
 
 /// Main loop: reads fanotify events, dups fds, sends to decision engine.
 /// Never blocks on responses — continues processing events immediately.
+///
+/// Pre-filters are ordered to minimize syscalls per event:
+/// 1. Self-PID: auto-allow (no syscalls, deadlock prevention)
+/// 2. Learning mode: auto-allow (no syscalls, just atomic load)
+/// 3. System UID < 1000: auto-allow (1 procfs read)
+/// 4. Known excluded basenames: auto-allow (1 procfs readlink)
+/// 5. Path resolution + /home filter: auto-allow non-/home (1 readlink)
+///
+/// This ordering ensures cheap checks run first, so expensive path
+/// resolution only happens for non-excluded user processes.
 fn event_reader_loop(
     fan: &Fanotify,
     event_tx: &mpsc::Sender<FanotifyEvent>,
     pending_fds: &Mutex<HashMap<u64, PendingFd>>,
     my_pid: i32,
+    learning_mode: &AtomicBool,
+    exclusion_basenames: &HashSet<String>,
 ) {
     loop {
         let events = match fan.read_events() {
@@ -163,6 +191,34 @@ fn event_reader_loop(
                 continue;
             }
 
+            // Learning mode: auto-allow immediately. This is checked BEFORE
+            // path resolution to avoid any syscalls in learning mode —
+            // critical for surviving login bursts without freezing.
+            if learning_mode.load(Ordering::Relaxed) {
+                write_allow(fan, &fd);
+                continue;
+            }
+
+            // Quick UID check: system processes (UID < 1000) are auto-allowed
+            // without path resolution. Catches daemons like dbus-daemon,
+            // polkitd, etc. One procfs read is cheaper than blocking them.
+            if let Some(uid) = quick_uid(pid) {
+                if uid < SYSTEM_UID_THRESHOLD {
+                    write_allow(fan, &fd);
+                    continue;
+                }
+            }
+
+            // Quick basename exclusion: check the process executable basename
+            // against the known exclusion set. Catches desktop processes
+            // (gnome-shell, sway, etc.) without path resolution.
+            if let Some(basename) = quick_exe_basename(pid) {
+                if exclusion_basenames.contains(&basename) {
+                    write_allow(fan, &fd);
+                    continue;
+                }
+            }
+
             // Resolve the file path from the event fd.
             let target_path = match resolve_event_path(&fd) {
                 Ok(path) => path,
@@ -178,7 +234,6 @@ fn event_reader_loop(
             };
 
             // Quick path filter: auto-allow anything not under /home.
-            // This avoids sending irrelevant events to the decision engine.
             if !target_path.starts_with("/home/") {
                 write_allow(fan, &fd);
                 continue;
@@ -200,11 +255,10 @@ fn event_reader_loop(
                 }
             }
 
-            let access_type = if event.mask().contains(MaskFlags::FAN_ACCESS_PERM) {
-                AccessType::Read
-            } else {
-                AccessType::Write
-            };
+            // We only monitor FAN_OPEN_PERM, so all events are opens.
+            // Treat them as reads since we can't determine write intent
+            // from the open permission event alone.
+            let access_type = AccessType::Read;
 
             let request_id = NEXT_REQUEST_ID.fetch_add(1, Ordering::Relaxed);
 
@@ -304,22 +358,30 @@ fn timeout_monitor_loop(
     loop {
         thread::sleep(Duration::from_secs(2));
 
-        let mut map = pending_fds.lock().expect("pending_fds lock poisoned");
-        let expired: Vec<u64> = map
-            .iter()
-            .filter(|(_, pfd)| pfd.created_at.elapsed() > RESPONSE_TIMEOUT)
-            .map(|(id, _)| *id)
-            .collect();
+        // Collect expired entries while holding the lock, then release
+        // the lock BEFORE writing responses. This prevents the reader
+        // thread from being blocked by slow response writes.
+        let expired: Vec<(u64, PendingFd)> = {
+            let mut map = pending_fds.lock().expect("pending_fds lock poisoned");
+            let expired_ids: Vec<u64> = map
+                .iter()
+                .filter(|(_, pfd)| pfd.created_at.elapsed() > RESPONSE_TIMEOUT)
+                .map(|(id, _)| *id)
+                .collect();
 
-        for id in &expired {
-            if let Some(pfd) = map.remove(id) {
-                tracing::warn!(
-                    request_id = id,
-                    elapsed_secs = pfd.created_at.elapsed().as_secs(),
-                    "pending event timed out, auto-allowing"
-                );
-                respond_duped(fan, pfd.duped_fd, true);
-            }
+            expired_ids
+                .into_iter()
+                .filter_map(|id| map.remove(&id).map(|pfd| (id, pfd)))
+                .collect()
+        };
+
+        for (id, pfd) in &expired {
+            tracing::warn!(
+                request_id = id,
+                elapsed_secs = pfd.created_at.elapsed().as_secs(),
+                "pending event timed out, auto-allowing"
+            );
+            respond_duped(fan, pfd.duped_fd, true);
         }
     }
 }
@@ -338,6 +400,24 @@ fn write_allow(fan: &Fanotify, fd: &impl AsRawFd) {
     if let Err(e) = fan.write_response(response) {
         tracing::error!(error = %e, "failed to write fanotify allow response");
     }
+}
+
+/// Quick UID lookup from /proc/<pid>/status without full ProcessInfo resolution.
+/// Returns None if the process is gone or the file can't be read.
+fn quick_uid(pid: i32) -> Option<u32> {
+    let status = std::fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
+    status
+        .lines()
+        .find(|line| line.starts_with("Uid:"))
+        .and_then(|line| line.split_whitespace().nth(1))
+        .and_then(|val| val.parse::<u32>().ok())
+}
+
+/// Quick executable basename lookup from /proc/<pid>/exe.
+/// Returns None if the process is gone or the symlink can't be read.
+fn quick_exe_basename(pid: i32) -> Option<String> {
+    let exe = std::fs::read_link(format!("/proc/{pid}/exe")).ok()?;
+    exe.file_name()?.to_str().map(|s| s.to_string())
 }
 
 /// Write a response using a duped fd, then close it.

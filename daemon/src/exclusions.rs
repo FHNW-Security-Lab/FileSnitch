@@ -204,6 +204,13 @@ impl ExclusionList {
         false
     }
 
+    /// Return a copy of the built-in basenames for use in the fanotify
+    /// reader thread's pre-filter. This allows the reader to auto-allow
+    /// known excluded processes without going through the async pipeline.
+    pub fn basenames_for_prefilter(&self) -> HashSet<String> {
+        self.builtin_basenames.clone()
+    }
+
     /// Add a user-defined exclusion.
     pub fn add_user_exclusion(&mut self, path: PathBuf) {
         self.user_executables.insert(path);

@@ -9,6 +9,7 @@ mod rules;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -106,37 +107,8 @@ async fn main() -> Result<()> {
     ));
 
     // -----------------------------------------------------------------------
-    // 6. Initialize fanotify (root only; otherwise D-Bus-only mode)
-    // -----------------------------------------------------------------------
-    let is_root = nix::unistd::geteuid().is_root();
-
-    // Channels between the fanotify reader thread and the async event loop.
-    // event_tx/event_rx: fanotify events from the reader to the decision loop.
-    // response_tx/response_rx: (request_id, allow) back to the reader.
-    let (event_tx, mut event_rx) = mpsc::channel(1024);
-    let (response_tx, response_rx) = std::sync::mpsc::channel::<(u64, bool)>();
-
-    let _fanotify_handle = if is_root {
-        match fanotify::init_fanotify() {
-            Ok(fan) => {
-                let handle = fanotify::spawn_event_reader(fan, event_tx, response_rx);
-                tracing::info!("fanotify event reader started");
-                Some(handle)
-            }
-            Err(e) => {
-                tracing::error!(error = %e, "failed to initialize fanotify");
-                return Err(e);
-            }
-        }
-    } else {
-        tracing::warn!(
-            "not running as root, fanotify disabled -- running in D-Bus-only mode for development"
-        );
-        None
-    };
-
-    // -----------------------------------------------------------------------
-    // 7-8. Set up D-Bus connection
+    // 6. Set up D-Bus connection (BEFORE fanotify — fanotify must start last
+    //    to avoid intercepting file access before the event loop is ready)
     // -----------------------------------------------------------------------
     let iface = FilesnitchInterface {
         engine: engine.clone(),
@@ -154,14 +126,20 @@ async fn main() -> Result<()> {
     tracing::info!("D-Bus interface registered on system bus as org.filesnitch.Daemon");
 
     // -----------------------------------------------------------------------
-    // 9. sd_notify ready
+    // 7. sd_notify ready
     // -----------------------------------------------------------------------
     let _ = sd_notify::notify(true, &[NotifyState::Ready]);
     tracing::info!("daemon ready (sd_notify sent)");
 
     // -----------------------------------------------------------------------
-    // 10. Spawn main event loop
+    // 8. Spawn main event loop (must be running BEFORE fanotify starts)
     // -----------------------------------------------------------------------
+    // Channels between the fanotify reader thread and the async event loop.
+    // event_tx/event_rx: fanotify events from the reader to the decision loop.
+    // response_tx/response_rx: (request_id, allow) back to the reader.
+    let (event_tx, mut event_rx) = mpsc::channel::<fanotify::FanotifyEvent>(2048);
+    let (response_tx, response_rx) = std::sync::mpsc::channel::<(u64, bool)>();
+
     let engine_loop = engine.clone();
     let event_log_loop = event_log.clone();
     let process_cache_loop = process_cache.clone();
@@ -237,6 +215,52 @@ async fn main() -> Result<()> {
 
         tracing::info!("event loop exiting");
     });
+
+    // -----------------------------------------------------------------------
+    // 9. Initialize fanotify LAST (event loop is now ready to process events)
+    // -----------------------------------------------------------------------
+    let is_root = nix::unistd::geteuid().is_root();
+
+    // Shared flag so the reader thread can bypass the async pipeline in
+    // learning mode (auto-allow immediately without blocking on decisions).
+    let learning_mode = {
+        let cfg = config.read().await;
+        Arc::new(AtomicBool::new(
+            cfg.general.operation_mode == config::OperationMode::Learning,
+        ))
+    };
+
+    // Collect exclusion basenames for reader-thread pre-filtering.
+    let exclusion_basenames = {
+        let cfg = config.read().await;
+        let excl = ExclusionList::new(&cfg);
+        Arc::new(excl.basenames_for_prefilter())
+    };
+
+    let _fanotify_handle = if is_root {
+        match fanotify::init_fanotify() {
+            Ok(fan) => {
+                let handle = fanotify::spawn_event_reader(
+                    fan,
+                    event_tx,
+                    response_rx,
+                    learning_mode.clone(),
+                    exclusion_basenames,
+                );
+                tracing::info!("fanotify event reader started");
+                Some(handle)
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "failed to initialize fanotify");
+                return Err(e);
+            }
+        }
+    } else {
+        tracing::warn!(
+            "not running as root, fanotify disabled -- running in D-Bus-only mode for development"
+        );
+        None
+    };
 
     // -----------------------------------------------------------------------
     // Spawn D-Bus signal emitter for pending permission requests
